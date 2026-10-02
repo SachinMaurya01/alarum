@@ -27,7 +27,11 @@ def test_start_and_status(tmp_path):
     mgr, _, _ = _manager(tmp_path)
     assert mgr.start() == 424242
     info = mgr.status()
-    assert info == {"running": True, "pid": 424242, "pid_file": str(tmp_path / "alarmd.pid")}
+    assert info == {
+        "running": True,
+        "pid": 424242,
+        "pid_file": str(tmp_path / "alarmd.pid"),
+    }
 
 
 def test_double_start_rejected(tmp_path):
@@ -52,6 +56,16 @@ def test_stop_kills_and_cleans_pidfile(tmp_path):
     assert mgr.stop(timeout=5) is True
     assert killed and killed[0][0] == 424242 and killed[0][1] == signal.SIGTERM
     assert not (tmp_path / "alarmd.pid").exists()
+
+
+def test_stop_purges_stale_commands(tmp_path):
+    # A SIGTERM that beats the drain must not leave a `stop` file behind
+    # to instantly kill the next daemon generation.
+    mgr, _, _ = _manager(tmp_path)
+    mgr.enqueue_command("stop")
+    mgr.enqueue_command("snooze", "abc", minutes=5)
+    assert mgr.stop(timeout=1) is False  # no pidfile: nothing running
+    assert list((tmp_path / "commands").glob("*.json")) == []
 
 
 def test_stale_pidfile_cleaned(tmp_path):

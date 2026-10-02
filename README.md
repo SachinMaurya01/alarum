@@ -1,14 +1,17 @@
 # alarmclock
 
-A production-grade command-line alarm clock. No GUI, no database, no runtime
-dependencies — alarms live in a single local JSON file and fire via a
-foreground loop or a background daemon.
+A production-grade command-line alarm clock. No GUI, no database — alarms live
+in a single local JSON file and fire via a foreground loop or a background daemon.
 
-- Fast, ergonomic CLI: `alarm add "in 25m"`, `alarm list`, `alarm next --watch`
+- Fast, ergonomic CLI (Typer): `alarm add "in 25m"`, `alarm list`, `alarm next --watch`
+- Rich terminal UI: styled tables on a TTY, live countdown, startup banner and
+  spinner — plain output when piped, `NO_COLOR` respected
 - Flexible times (`07:30`, `7:30pm`, `in 2h30m`, `tomorrow 6am`) and recurrence
   (`daily`, `weekdays`, `weekly:MO,WE`, raw `RRULE`)
-- Reliable firing: short-tick wall-clock scheduler, audio → system player →
-  terminal-bell fallback, desktop notifications
+- Reliable firing: wall-clock scheduler that naps until the next alarm,
+  audio → system player → terminal-bell fallback, desktop notifications
+- Interactive ringing: press `s`/`d` (+ Enter) in the ringing terminal to
+  snooze or dismiss in place
 - Safe state: atomic writes, file locking, `0o600` permissions, schema
   versioning, corrupt-file backup
 - Scriptable: `--json` output, stable exit codes, `NO_COLOR`/pipe-aware output
@@ -39,7 +42,7 @@ foreground loop or a background daemon.
 ## Requirements
 
 - Python 3.10 or newer
-- No third-party runtime dependencies (standard library only)
+- Runtime dependencies (installed automatically): `typer`, `rich`
 - Works on Linux, macOS, and Windows
 
 ## Installation
@@ -119,7 +122,8 @@ alarm add 18:00 --repeat weekly:MO,WE,FR --sound ~/chime.wav --tz Europe/Berlin
 
 ### `alarm list [--all] [--json]`
 
-List enabled alarms as a table (or JSON). `--all` includes disabled ones.
+List enabled alarms as a styled table on a TTY (plain text when piped),
+including a `NEXT` column, or as JSON. `--all` includes disabled ones.
 
 ```bash
 alarm list
@@ -147,14 +151,16 @@ alarm edit f4f913 --repeat daily
 
 ### `alarm next [--watch] [--json]`
 
-Show the next alarm to fire and how soon. `--watch` renders a live 1-second
-countdown until interrupted. Prints JSON `null` with `--json` when nothing is
-scheduled.
+Show the next alarm to fire and how soon. `--watch` renders a live-updating
+countdown (rich `Live`, Ctrl-C to quit; prints once when not a TTY). Prints
+JSON `null` with `--json` when nothing is scheduled.
 
 ### `alarm run [--tick SEC]`
 
-Run the scheduler in the foreground. Polls every `--tick` seconds (clamped to
-1–30, default 1) and fires whatever is due. See
+Run the scheduler in the foreground. Shows a startup banner (alarm count, next
+fire, tick), then fires whatever is due, napping efficiently between alarms
+(see [Behavior and edge cases](#behavior-and-edge-cases)). `--tick` sets the
+minimum poll granularity (clamped to 1–30, default 1); Ctrl-C stops. See
 [When an alarm fires](#when-an-alarm-fires).
 
 ### `alarm snooze <id> [minutes]`
@@ -249,6 +255,10 @@ transitions behave sanely (see
    - the alarm's `--sound` file via the OS player (`afplay`, `paplay`/`aplay`,
      `mpv`, Windows system sounds),
    - else the terminal bell (`\a`), which always works.
+   While ringing in an interactive terminal you'll see
+   `Press [s]nooze  [d]ismiss` — type `s` or `d` + Enter to snooze (default
+   length) or dismiss without opening another terminal. (Terminals are
+   line-buffered, so the Enter keystroke is required.)
 4. Afterwards the occurrence is recorded: one-shots are disabled, recurring
    alarms resume their schedule, snooze counters reset — unless you snoozed
    mid-ring, in which case the snooze (and its count) is kept and refires.
@@ -268,10 +278,12 @@ The daemon is the same scheduler loop running detached, so alarms fire without
 an open terminal.
 
 ```bash
-alarm daemon start --tick 5   # poll interval, 1–30 s
+alarm daemon start --tick 5   # poll granularity, 1–30 s (idle naps up to 30 s)
 alarm daemon status            # pid + liveness
 alarm daemon stop              # SIGTERM, then SIGKILL fallback
 ```
+
+`start` shows a spinner while the child reports healthy, then its pid.
 
 Implementation notes:
 
@@ -284,7 +296,9 @@ Implementation notes:
   polled each tick), *in addition to* the shared state file — so ringing stops
   within about a second either way.
 - `stop` sends SIGTERM (graceful, finishes the current tick) and escalates to
-  SIGKILL after a timeout.
+  SIGKILL after a timeout. It also purges the command queue, so leftovers from
+  this generation (e.g. an undrained `stop` file) can never kill the next
+  daemon on startup.
 - Running `alarm run` while the daemon lives is allowed; the shared state file
   plus occurrence bookkeeping normally prevents double-firing, but don't rely
   on it — pick one.
@@ -365,8 +379,9 @@ Config file location: `<data-dir>/config.json`, or `--config PATH` /
 
 ## Scripting and automation
 
-- `--json` on read commands (`add`, `list`, `next`, `enable`/`disable`,
-  `snooze`, `dismiss`, `edit`, `daemon status`, `doctor`, `config show`):
+- `--json` on `add`, `list`, `next`, `remove`, `enable`/`disable`,
+  `snooze`, `dismiss`, `edit`, `daemon status`, `daemon stop`,
+  `doctor`, `config show`, `config set`:
 
 ```bash
 alarm --json list | python3 -c "import json,sys; print(len(json.load(sys.stdin)), 'alarms')"
@@ -377,7 +392,8 @@ alarm --json next
   usage or bad input · `3` alarm not found · `4` storage error (corrupt,
   locked, permissions) · `5` scheduler/daemon error. `doctor` exits `1` when a
   check fails.
-- Color is used only on a TTY and honors `NO_COLOR`; piped output is plain.
+- Rich tables and colors on a TTY (`list`, startup banner, live countdown,
+  spinner); plain output when piped. `NO_COLOR` is respected natively.
   `--quiet` suppresses normal output, `--verbose`/`--debug` add logging
   (`--debug` re-raises internal errors with a traceback for bug reports).
 - The CLI never prints tracebacks under normal operation.
@@ -420,9 +436,13 @@ actions, and shell names.
 
 ## Behavior and edge cases
 
-- **Polling, not sleeping**: the scheduler wakes every 1–30 s and compares
-  wall-clock time, so laptop suspend/resume and system clock changes are
-  handled; there is no long `sleep` to drift.
+- **Naps, not polling**: the scheduler computes the time to the next alarm and
+  sleeps until then (up to a 30 s heartbeat for clock changes and external
+  edits), instead of waking every second. State reloads are guarded by a file
+  `mtime` cache, so idle wakes cost a single `stat`. Firing is wall-clock
+  based, so naps can never overshoot; imminent alarms still wake precisely.
+  Suspend/resume and system clock changes are handled — there is no long
+  `sleep` to drift.
 - **No catch-up storms**: a (re)started scheduler only owns occurrences from
   when it starts watching. Yesterday's daily alarm won't fire at startup —
   except a *pending snooze*, which always refires (even late).
@@ -437,11 +457,14 @@ actions, and shell names.
 
 ## Architecture
 
-Ports-and-adapters, dependency-injected, stdlib-only:
+Ports-and-adapters, dependency-injected. The domain, storage, scheduler,
+audio, and notify layers are standard library only; the CLI boundary uses
+Typer (commands, help, shell option parsing) and Rich (tables, live views,
+banner, spinner):
 
 ```
 src/alarmclock/
-  cli/          # argument parsing + output formatting only
+  cli/          # Typer commands + rich/plain output (views.py, doctor.py, ...)
   domain/       # alarm model, recurrence, next-fire (pure, no I/O)
   services/     # AlarmService: add/list/remove/snooze orchestration
   storage/      # AlarmRepository protocol + atomic file implementation
@@ -461,10 +484,11 @@ formats output.
 
 ```bash
 pip install -e ".[dev]"
-pytest                                # 80%+ coverage gate (see pyproject)
+pytest                                # 80% coverage gate (see pyproject)
 ruff check src tests
 ruff format --check src tests
-mypy --strict src
+mypy --strict src                     # note: pre-existing debt in platform
+                                      # branches; contributions should add none
 bandit -r src && pip-audit
 ```
 
@@ -496,6 +520,11 @@ the data directory is writable (`alarm doctor`).
 `alarms.json.corrupt-<timestamp>.bak` next to the original — inspect/restore
 it, or delete the corrupt file to start fresh. Never edit `alarms.json` while
 the daemon runs.
+
+**Ringing prompt doesn't respond.** The prompt only listens on an interactive
+terminal, and terminals are line-buffered — type the letter *plus Enter*.
+Nothing to press in daemon mode or pipes; use `alarm snooze/dismiss <id>`
+from another terminal instead.
 
 **Snooze refused.** You've hit `max_snoozes` for this occurrence — `dismiss`
 it or raise the cap: `alarm config set max_snoozes 5`.

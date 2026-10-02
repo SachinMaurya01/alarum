@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Production-grade command-line alarm clock: recurring alarms, daemon mode, JSON output"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["typer>=0.9", "rich>=13"]
 keywords = ["alarm", "cli", "scheduler", "reminder"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",

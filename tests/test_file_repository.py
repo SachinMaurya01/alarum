@@ -5,17 +5,21 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from alarmclock.domain.alarm import Alarm
 from alarmclock.errors import StorageError
 from alarmclock.storage.file_repository import FileAlarmRepository
 
-import pytest
-
 
 def _alarm(alarm_id="a1b2c3"):
     return Alarm(
-        id=alarm_id, label="Standup", hour=9, minute=30,
-        timezone="Asia/Kolkata", recurrence="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+        id=alarm_id,
+        label="Standup",
+        hour=9,
+        minute=30,
+        timezone="Asia/Kolkata",
+        recurrence="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
         created_at=datetime(2026, 10, 1, 10, 0, tzinfo=ZoneInfo("UTC")),
     )
 

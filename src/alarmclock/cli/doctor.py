@@ -45,14 +45,21 @@ def _check_python() -> dict:
 
 def _check_timezones() -> dict:
     try:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        from zoneinfo import ZoneInfo
 
         ZoneInfo("America/New_York")
         ZoneInfo("Asia/Kolkata")
-        return {"check": "timezones", "status": "ok", "detail": "zoneinfo database available"}
+        return {
+            "check": "timezones",
+            "status": "ok",
+            "detail": "zoneinfo database available",
+        }
     except Exception as exc:  # noqa: BLE001 - diagnostics must not raise
-        return {"check": "timezones", "status": "fail",
-                "detail": f"zoneinfo broken ({exc}); install tzdata"}
+        return {
+            "check": "timezones",
+            "status": "fail",
+            "detail": f"zoneinfo broken ({exc}); install tzdata",
+        }
 
 
 def _check_data_dir(data_file: str) -> dict:
@@ -70,19 +77,29 @@ def _check_data_dir(data_file: str) -> dict:
 def _check_state_file(data_file: str) -> dict:
     path = Path(data_file).expanduser()
     if not path.exists():
-        return {"check": "state-file", "status": "ok", "detail": "not created yet (first run creates it)"}
+        return {
+            "check": "state-file",
+            "status": "ok",
+            "detail": "not created yet (first run creates it)",
+        }
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return {"check": "state-file", "status": "fail",
-                "detail": f"{path} unreadable ({exc}); backups kept next to it"}
+        return {
+            "check": "state-file",
+            "status": "fail",
+            "detail": f"{path} unreadable ({exc}); backups kept next to it",
+        }
     alarms = payload.get("alarms") if isinstance(payload, dict) else payload
     detail = f"{path} ({len(alarms) if isinstance(alarms, list) else '?'} alarms)"
     if os.name == "posix":
         try:
             if path.stat().st_mode & 0o777 != 0o600:
-                return {"check": "state-file", "status": "warn",
-                        "detail": detail + " (permissions not 0o600)"}
+                return {
+                    "check": "state-file",
+                    "status": "warn",
+                    "detail": detail + " (permissions not 0o600)",
+                }
         except OSError:
             pass
     return {"check": "state-file", "status": "ok", "detail": detail}
@@ -93,16 +110,29 @@ def _check_config(config_path: str | None) -> dict:
 
     path = resolve_config_path(config_path)
     if not path.exists():
-        return {"check": "config", "status": "ok", "detail": "defaults (no config file)"}
+        return {
+            "check": "config",
+            "status": "ok",
+            "detail": "defaults (no config file)",
+        }
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         load_config(str(path))
         unknown = sorted(k for k in raw if k not in _config_fields())
-        detail = str(path) + (" (unknown keys: " + ", ".join(unknown) + ")" if unknown else "")
-        return {"check": "config", "status": "warn" if unknown else "ok", "detail": detail}
+        detail = str(path) + (
+            " (unknown keys: " + ", ".join(unknown) + ")" if unknown else ""
+        )
+        return {
+            "check": "config",
+            "status": "warn" if unknown else "ok",
+            "detail": detail,
+        }
     except (OSError, ValueError) as exc:
-        return {"check": "config", "status": "warn",
-                "detail": f"{path} unreadable, using defaults ({exc})"}
+        return {
+            "check": "config",
+            "status": "warn",
+            "detail": f"{path} unreadable, using defaults ({exc})",
+        }
 
 
 def _config_fields() -> set[str]:
@@ -127,9 +157,16 @@ def _check_audio() -> dict:
     else:
         found = [b for b in ("paplay", "aplay", "mpv", "play") if shutil.which(b)]
     if found:
-        return {"check": "audio", "status": "ok", "detail": "backends: " + ", ".join(found)}
-    return {"check": "audio", "status": "warn",
-            "detail": "no system player found; terminal bell fallback will be used"}
+        return {
+            "check": "audio",
+            "status": "ok",
+            "detail": "backends: " + ", ".join(found),
+        }
+    return {
+        "check": "audio",
+        "status": "warn",
+        "detail": "no system player found; terminal bell fallback will be used",
+    }
 
 
 def _check_notifications() -> dict:
@@ -141,9 +178,16 @@ def _check_notifications() -> dict:
     else:
         found = shutil.which("notify-send") is not None
     if found:
-        return {"check": "notifications", "status": "ok", "detail": "desktop backend available"}
-    return {"check": "notifications", "status": "warn",
-            "detail": "no desktop backend; alarms print to the terminal"}
+        return {
+            "check": "notifications",
+            "status": "ok",
+            "detail": "desktop backend available",
+        }
+    return {
+        "check": "notifications",
+        "status": "warn",
+        "detail": "no desktop backend; alarms print to the terminal",
+    }
 
 
 def _check_daemon(data_file: str) -> dict:
@@ -153,7 +197,15 @@ def _check_daemon(data_file: str) -> dict:
     try:
         info = mgr.status()
     except OSError as exc:
-        return {"check": "daemon", "status": "warn", "detail": f"status unavailable ({exc})"}
+        return {
+            "check": "daemon",
+            "status": "warn",
+            "detail": f"status unavailable ({exc})",
+        }
     if info["running"]:
-        return {"check": "daemon", "status": "ok", "detail": f"running (pid {info['pid']})"}
+        return {
+            "check": "daemon",
+            "status": "ok",
+            "detail": f"running (pid {info['pid']})",
+        }
     return {"check": "daemon", "status": "ok", "detail": "not running"}

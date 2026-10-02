@@ -23,7 +23,11 @@ def _service(tmp_path, start: datetime, **cfg_kwargs):
 
 def _runner(svc, clock, cfg):
     player, notifier = FakePlayer(), FakeNotifier()
-    return Runner(svc, clock, player, notifier, cfg, sleep_fn=lambda s: None), player, notifier
+    return (
+        Runner(svc, clock, player, notifier, cfg, sleep_fn=lambda s: None),
+        player,
+        notifier,
+    )
 
 
 def test_add_list_next(tmp_path):
@@ -48,7 +52,7 @@ def test_enable_disable_remove(tmp_path):
 
 def test_runner_fires_due_alarm(tmp_path):
     svc, clock, cfg = _service(tmp_path, datetime(2026, 10, 1, 9, 29, tzinfo=UTC))
-    a = svc.add("09:30")
+    svc.add("09:30")
     runner, player, notifier = _runner(svc, clock, cfg)
     assert runner.tick_once() == 0  # not due yet
     clock.advance(timedelta(minutes=2))  # 09:31, alarm due
@@ -61,8 +65,8 @@ def test_runner_fires_due_alarm(tmp_path):
 def test_runner_missed_policy_skip(tmp_path):
     svc, clock, cfg = _service(tmp_path, datetime(2026, 10, 1, 8, 0, tzinfo=UTC))
     cfg.missed_policy = "skip"
-    a = svc.add("08:30")
-    runner, player, notifier = _runner(svc, clock, cfg)
+    svc.add("08:30")
+    runner, player, _notifier = _runner(svc, clock, cfg)
     assert runner.tick_once() == 0  # watching from 08:00
     clock.advance(timedelta(hours=3))  # way past due + grace
     assert runner.tick_once() == 0

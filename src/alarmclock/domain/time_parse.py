@@ -28,11 +28,14 @@ _DATED_RE = re.compile(
 )
 _HM_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m?\.?)?$", re.IGNORECASE)
 _NAT_RE = re.compile(
-    r"^(today|tomorrow)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m?\.?)?$", re.IGNORECASE
+    r"^(today|tomorrow)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s?m?\.?)?$",
+    re.IGNORECASE,
 )
 
 
-def parse_time_input(raw: str, now: datetime, default_tz: str) -> tuple[int, int, str | None, str]:
+def parse_time_input(
+    raw: str, now: datetime, default_tz: str
+) -> tuple[int, int, str | None, str]:
     s = raw.strip()
     if not s:
         raise InvalidInput("Empty time. Try 07:30, 'in 15m', 'tomorrow 6am'.")
@@ -88,7 +91,9 @@ def _to_24h(h: str, mi: str | None, ampm: str | None) -> tuple[int, int]:
     return hour, minute
 
 
-def _parse_relative(body: str, now: datetime, tzname: str) -> tuple[int, int, str | None, str]:
+def _parse_relative(
+    body: str, now: datetime, tzname: str
+) -> tuple[int, int, str | None, str]:
     parts = _REL_PART.findall(body)
     if not parts or "".join(f"{n}{u}" for n, u in parts).replace(" ", "") != re.sub(
         r"\s+", "", body

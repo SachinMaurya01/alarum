@@ -40,9 +40,24 @@ def test_doctor_flags_corrupt_state(tmp_path, monkeypatch):
 
 def test_config_set_show_roundtrip(tmp_path, monkeypatch, capsys):
     _env(tmp_path, monkeypatch)
-    assert main(["--config", str(tmp_path / "config.json"), "config", "set", "snooze_minutes", "10"]) == 0
+    assert (
+        main(
+            [
+                "--config",
+                str(tmp_path / "config.json"),
+                "config",
+                "set",
+                "snooze_minutes",
+                "10",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert main(["--config", str(tmp_path / "config.json"), "--json", "config", "show"]) == 0
+    assert (
+        main(["--config", str(tmp_path / "config.json"), "--json", "config", "show"])
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)["snooze_minutes"] == 10
     if os.name == "posix":
         assert oct((tmp_path / "config.json").stat().st_mode & 0o777) == "0o600"

@@ -7,7 +7,9 @@ import sys
 from pathlib import Path
 
 
-def setup_logging(verbose: bool = False, debug: bool = False, log_file: Path | None = None) -> logging.Logger:
+def setup_logging(
+    verbose: bool = False, debug: bool = False, log_file: Path | None = None
+) -> logging.Logger:
     level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
     logger = logging.getLogger("alarmclock")
     logger.setLevel(level)

@@ -55,9 +55,11 @@ class SystemPlayer:
             try:
                 import winsound  # type: ignore[import-not-found]
 
-                winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                winsound.PlaySound(
+                    str(path), winsound.SND_FILENAME | winsound.SND_ASYNC
+                )
                 return True
-            except Exception as exc:
+            except OSError as exc:
                 log.debug("winsound failed: %s", exc)
         else:
             for bin_name in ("paplay", "aplay", "mpv", "play"):
@@ -66,7 +68,7 @@ class SystemPlayer:
                     break
         for cmd in cmds:
             try:
-                subprocess.run(cmd, check=False, timeout=30)  # noqa: S603 - argv list, no shell
+                subprocess.run(cmd, check=False, timeout=30)
                 return True
             except (OSError, subprocess.SubprocessError) as exc:
                 log.debug("player %s failed: %s", cmd[0], exc)

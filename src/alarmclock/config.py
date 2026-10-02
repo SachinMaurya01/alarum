@@ -36,12 +36,12 @@ def _local_tzname() -> str:
     try:
         from datetime import datetime
 
-        tz = datetime.now().astimezone().tzinfo
-        key = getattr(tz, "key", None)
-        if key:
-            return str(key)
-    except Exception:
-        pass
+        tzinfo = datetime.now().astimezone().tzinfo
+    except OSError:
+        tzinfo = None
+    key = getattr(tzinfo, "key", None)
+    if key:
+        return str(key)
     return os.environ.get("TZ", "UTC")
 
 
@@ -154,7 +154,9 @@ def coerce_config_value(key: str, raw: str) -> object:
         return val
     if key == "missed_policy":
         if raw not in {"fire-now", "skip", "mark-missed"}:
-            raise InvalidInput(f"missed_policy must be fire-now|skip|mark-missed, got {raw!r}")
+            raise InvalidInput(
+                f"missed_policy must be fire-now|skip|mark-missed, got {raw!r}"
+            )
         return raw
     if key == "notifications":
         if raw.lower() in {"1", "true", "yes", "on"}:

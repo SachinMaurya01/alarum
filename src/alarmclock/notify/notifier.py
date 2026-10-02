@@ -12,8 +12,7 @@ log = logging.getLogger("alarmclock.notify")
 
 
 class Notifier(Protocol):
-    def notify(self, title: str, body: str) -> bool:
-        ...
+    def notify(self, title: str, body: str) -> bool: ...
 
 
 class DesktopNotifier:
@@ -23,12 +22,12 @@ class DesktopNotifier:
         try:
             if sys.platform == "darwin" and shutil.which("osascript"):
                 script = f'display notification "{body}" with title "{title}"'
-                subprocess.run(["osascript", "-e", script], check=False, timeout=10)  # noqa: S603
+                subprocess.run(["osascript", "-e", script], check=False, timeout=10)
                 return True
             if sys.platform == "win32":
                 return self._win_toast(title, body)
             if shutil.which("notify-send"):
-                subprocess.run(["notify-send", title, body], check=False, timeout=10)  # noqa: S603
+                subprocess.run(["notify-send", title, body], check=False, timeout=10)
                 return True
         except (OSError, subprocess.SubprocessError) as exc:
             log.debug("desktop notify failed: %s", exc)
@@ -41,10 +40,10 @@ class DesktopNotifier:
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
             "ContentType = WindowsRuntime] | Out-Null; "
             f"$t = '{title}'; $b = '{body}'; "
-            "Write-Host \"$t : $b\""
+            'Write-Host "$t : $b"'
         )
         try:
-            subprocess.run(  # noqa: S603
+            subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps], check=False, timeout=15
             )
             return True

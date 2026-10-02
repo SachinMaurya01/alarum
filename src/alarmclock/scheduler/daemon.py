@@ -74,7 +74,11 @@ class DaemonManager:
     def status(self) -> dict:
         pid = self.read_pid()
         running = pid is not None and self._pid_alive(pid)
-        return {"running": running, "pid": pid if running else None, "pid_file": str(self.pid_file)}
+        return {
+            "running": running,
+            "pid": pid if running else None,
+            "pid_file": str(self.pid_file),
+        }
 
     # -- lifecycle ------------------------------------------------------
     def start(self, tick: float = 1.0) -> int:
@@ -96,10 +100,12 @@ class DaemonManager:
     def stop(self, timeout: float = 10.0) -> bool:
         pid = self.read_pid()
         if pid is None:
+            self.purge_commands()
             return False
         if not self._pid_alive(pid):
             with contextlib.suppress(OSError):
                 self.pid_file.unlink()
+            self.purge_commands()
             return False
         # Ask nicely first (fast path: daemon polls the channel each tick),
         # then SIGTERM, then SIGKILL as a last resort.
@@ -118,13 +124,42 @@ class DaemonManager:
         with contextlib.suppress(OSError):
             if not self._pid_alive(pid) and self.read_pid() == pid:
                 self.pid_file.unlink()
+        # No consumer remains: drop queued commands so a future daemon never
+        # acts on this generation's leftovers (e.g. a stale `stop` file from
+        # a SIGTERM that beat the drain would instantly kill its successor).
+        self.purge_commands()
         return True
 
+    def purge_commands(self, action: str | None = None) -> int:
+        """Delete queued command files (optionally only one action)."""
+        if not self.commands_dir.is_dir():
+            return 0
+        removed = 0
+        for path in sorted(self.commands_dir.glob("*.json")):
+            if action is not None:
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    payload = {}
+                if payload.get("action") != action:
+                    continue
+            with contextlib.suppress(OSError):
+                path.unlink()
+                removed += 1
+        return removed
+
     # -- command channel --------------------------------------------------
-    def enqueue_command(self, action: str, alarm_id: str = "", minutes: int | None = None) -> Path:
+    def enqueue_command(
+        self, action: str, alarm_id: str = "", minutes: int | None = None
+    ) -> Path:
         self.commands_dir.mkdir(parents=True, exist_ok=True)
-        payload = {"action": action, "alarm_id": alarm_id, "minutes": minutes,
-                   "token": secrets.token_hex(8), "ts": time.time()}
+        payload = {
+            "action": action,
+            "alarm_id": alarm_id,
+            "minutes": minutes,
+            "token": secrets.token_hex(8),
+            "ts": time.time(),
+        }
         # Atomic drop: write temp then rename so the daemon never reads partials.
         tmp = self.commands_dir / f".tmp-{payload['token']}.json"
         dst = self.commands_dir / f"{int(payload['ts'])}-{payload['token']}.json"
@@ -152,25 +187,48 @@ class DaemonManager:
     def _default_spawn(self, tick: float) -> int:
         """Spawn the detached child; returns its PID (best effort)."""
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        logf = open(self.log_file, "a", encoding="utf-8")  # noqa: PTH123 - kept open by child
-        argv = ([sys.executable, "-m", "alarmclock.cli.main"] + self.extra_argv
-                + ["--data-file", str(self.data_dir / "alarms.json"),
-                   "daemon", "_child", "--tick", str(tick)])
-        kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": logf, "stderr": subprocess.STDOUT}
+        argv = (
+            [sys.executable, "-m", "alarmclock.cli.main"]
+            + self.extra_argv
+            + [
+                "--data-file",
+                str(self.data_dir / "alarms.json"),
+                "daemon",
+                "_child",
+                "--tick",
+                str(tick),
+            ]
+        )
         if sys.platform == "win32":
-            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            kwargs["creationflags"] = flags
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+            popen_kwargs: dict[str, object] = {
+                "stdin": subprocess.DEVNULL,
+                "creationflags": flags,
+            }
         else:
-            kwargs["start_new_session"] = True
+            popen_kwargs = {"stdin": subprocess.DEVNULL, "start_new_session": True}
         try:
-            proc = subprocess.Popen(argv, **kwargs)  # noqa: S603 - argv list, no shell
+            # The child inherits its own dup of the log fd; ours closes here.
+            with open(self.log_file, "a", encoding="utf-8") as logf:
+                proc = subprocess.Popen(
+                    argv, stdout=logf, stderr=subprocess.STDOUT, **popen_kwargs
+                )
         except OSError as exc:
             raise SchedulerError(f"Cannot spawn daemon: {exc}") from exc
         return proc.pid
 
 
-def daemon_main(data_dir: str | Path, tick: float = 1.0, stop_after: int | None = None) -> int:
+def daemon_main(
+    data_dir: str | Path,
+    tick: float = 1.0,
+    stop_after: int | None = None,
+    sleep_fn: Callable[[float], object] | None = None,
+) -> int:
     """Child entry point: poll + fire until a `stop` command arrives."""
+    import threading
+
     from alarmclock.audio.player import SystemPlayer
     from alarmclock.clock import SystemClock
     from alarmclock.config import AppConfig, load_config
@@ -184,10 +242,12 @@ def daemon_main(data_dir: str | Path, tick: float = 1.0, stop_after: int | None 
     mgr.data_dir.mkdir(parents=True, exist_ok=True)
     logger = setup_logging(verbose=True, log_file=mgr.log_file)
     stop_requested = False
+    stop_event = threading.Event()
 
     def _on_term(signum: int, frame: object) -> None:
         nonlocal stop_requested
         stop_requested = True
+        stop_event.set()  # wake the sleeper immediately (time.sleep retries)
 
     with contextlib.suppress(OSError):
         signal.signal(signal.SIGTERM, _on_term)
@@ -195,7 +255,10 @@ def daemon_main(data_dir: str | Path, tick: float = 1.0, stop_after: int | None 
     config: AppConfig = load_config()
     repo = FileAlarmRepository(mgr.data_dir / "alarms.json")
     service = AlarmService(repo, SystemClock(), config)
-    runner = Runner(service, SystemClock(), SystemPlayer(), DesktopNotifier(), config, tick=tick)
+    runner = Runner(
+        service, SystemClock(), SystemPlayer(), DesktopNotifier(), config, tick=tick
+    )
+    sleeper = sleep_fn or stop_event.wait
     _write_pidfile(mgr.pid_file)
     logger.info("alarmd started (pid %d, tick %ss)", os.getpid(), tick)
     fired = 0
@@ -214,7 +277,7 @@ def daemon_main(data_dir: str | Path, tick: float = 1.0, stop_after: int | None 
             iters += 1
             if stop_after is not None and iters >= stop_after:
                 break
-            time.sleep(tick)
+            sleeper(min(tick, runner.sleep_delay()))
     finally:
         _remove_pidfile(mgr.pid_file)
         logger.info("alarmd stopped (fired %d)", fired)
@@ -251,7 +314,10 @@ def _remove_pidfile(path: Path) -> None:
     with contextlib.suppress(OSError):
         if path.exists():
             try:
-                if int(path.read_text(encoding="utf-8").strip().split()[0]) == os.getpid():
+                if (
+                    int(path.read_text(encoding="utf-8").strip().split()[0])
+                    == os.getpid()
+                ):
                     path.unlink()
             except (ValueError, IndexError):
                 pass
@@ -271,4 +337,3 @@ def _pid_alive(pid: int) -> bool:
 
 def _kill(pid: int, sig: int) -> None:
     os.kill(pid, sig)
-

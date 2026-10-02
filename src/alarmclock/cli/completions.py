@@ -65,4 +65,6 @@ def completion_script(shell: str) -> str:
     except KeyError:
         from alarmclock.errors import InvalidInput
 
-        raise InvalidInput(f"Unknown shell {shell!r}; choose bash, zsh or fish") from None
+        raise InvalidInput(
+            f"Unknown shell {shell!r}; choose bash, zsh or fish"
+        ) from None

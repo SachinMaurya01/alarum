@@ -17,7 +17,8 @@ DST policy:
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time as dtime, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
 from alarmclock.domain.alarm import Alarm
@@ -30,7 +31,11 @@ _BYDAY_RE = re.compile(r"^[A-Z]{2}(,[A-Z]{2})*$")
 
 def normalize_recurrence(raw: str | None) -> str:
     """Normalize user/CLI repeat input to a stored rule."""
-    if raw is None or raw.strip() == "" or raw.strip().lower() in {"once", "one-shot", "oneshot"}:
+    if (
+        raw is None
+        or raw.strip() == ""
+        or raw.strip().lower() in {"once", "one-shot", "oneshot"}
+    ):
         return "ONCE"
     s = raw.strip()
     upper = s.upper()
@@ -41,8 +46,7 @@ def normalize_recurrence(raw: str | None) -> str:
         rest = s[6:].strip()
         if rest == "":
             return "DAILY"  # bare 'weekly' without days is meaningless -> daily
-        if rest.startswith(":"):
-            rest = rest[1:]
+        rest = rest.removeprefix(":")
         m = re.match(r"(?i)BYDAY=(.+)", rest)
         days = m.group(1) if m else rest
         day_list = [d.strip().upper() for d in days.split(",") if d.strip()]
@@ -90,7 +94,9 @@ def allowed_weekdays(recurrence: str) -> set[int] | None:
     return None
 
 
-def _make_aware(candidate_date: date, hour: int, minute: int, zone: ZoneInfo) -> datetime:
+def _make_aware(
+    candidate_date: date, hour: int, minute: int, zone: ZoneInfo
+) -> datetime:
     """Build aware datetime honoring the DST gap/overlap policy."""
     naive_base = datetime.combine(candidate_date, dtime(hour, minute))
     # Overlap: fold=0 picks first occurrence.
@@ -104,7 +110,10 @@ def _make_aware(candidate_date: date, hour: int, minute: int, zone: ZoneInfo) ->
             probe = probe + timedelta(minutes=1)
             cand = probe.replace(tzinfo=zone, fold=0)
             rt = cand.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(fold=0)
-            if (rt.hour, rt.minute) == (probe.hour, probe.minute) and rt.date() == probe.date():
+            if (rt.hour, rt.minute) == (
+                probe.hour,
+                probe.minute,
+            ) and rt.date() == probe.date():
                 return cand
         return dt  # fallback: return as-is rather than crash
     return dt
@@ -141,7 +150,7 @@ def next_fire(alarm: Alarm, now: datetime) -> datetime | None:
         tomorrow = now_local.date() + timedelta(days=1)
         return _make_aware(tomorrow, alarm.hour, alarm.minute, zone)
 
-    for offset in range(0, 366):
+    for offset in range(366):
         day = now_local.date() + timedelta(days=offset)
         if allowed is not None and day.weekday() not in allowed:
             continue
@@ -184,7 +193,7 @@ def last_fire(alarm: Alarm, now: datetime) -> datetime | None:
         return cand if cand <= now else None
 
     allowed = allowed_weekdays(alarm.recurrence)
-    for offset in range(0, 366):
+    for offset in range(366):
         day = now_local.date() - timedelta(days=offset)
         if allowed is not None and day.weekday() not in allowed:
             continue

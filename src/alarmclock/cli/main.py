@@ -1,21 +1,34 @@
-"""CLI entry point. Argparse now; Typer+Rich later.
+"""CLI entry point. Typer commands + rich output; machine-readable --json.
 
-Commands: add, list, remove, enable, disable, next, run, snooze, dismiss,
-edit, daemon, config, doctor, completions.
-All read commands support --json. Exit codes: 0 ok, 1 error, 2 bad input,
-3 not found, 4 storage error, 5 scheduler error.
+Exit codes: 0 ok, 1 error, 2 bad input, 3 not found, 4 storage error,
+5 scheduler error.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
+
+import typer
+from rich.console import Console
+from rich.live import Live
+from typer._click.exceptions import NoArgsIsHelpError, UsageError
 
 from alarmclock.audio.player import SystemPlayer
+from alarmclock.cli.completions import completion_script
+from alarmclock.cli.doctor import overall_status, run_checks
+from alarmclock.cli.formatting import dim, format_table, green
+from alarmclock.cli.views import alarm_table, run_banner, spinner
 from alarmclock.clock import SystemClock
-from alarmclock.config import AppConfig, data_file_path, load_config
+from alarmclock.config import (
+    AppConfig,
+    coerce_config_value,
+    data_file_path,
+    load_config,
+    save_config,
+)
 from alarmclock.domain.recurrence import next_fire
 from alarmclock.errors import AlarmError, exit_code_for
 from alarmclock.logging_setup import setup_logging
@@ -24,95 +37,63 @@ from alarmclock.scheduler.daemon import DaemonManager, daemon_main
 from alarmclock.scheduler.runner import Runner
 from alarmclock.services.service import AlarmService
 from alarmclock.storage.file_repository import FileAlarmRepository
-from alarmclock.cli.formatting import dim, format_table, green
+
+app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+daemon_app = typer.Typer(no_args_is_help=True, help="Background scheduler.")
+config_app = typer.Typer(no_args_is_help=True, help="Show or change configuration.")
+app.add_typer(daemon_app, name="daemon")
+app.add_typer(config_app, name="config")
+
+_DEBUG = False
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="alarm", description="CLI alarm clock")
-    p.add_argument("--data-file", default=None, help="State file path (overrides default)")
-    p.add_argument("--config", default=None, help="Config file path")
-    p.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
-                   help="Machine-readable output")
-    p.add_argument("--quiet", action="store_true")
-    p.add_argument("--verbose", action="store_true")
-    p.add_argument("--debug", action="store_true")
-    sub = p.add_subparsers(dest="command", required=True)
-
-    a = sub.add_parser("add", help="Create an alarm")
-    a.add_argument("time", help='e.g. 07:30, "in 15m", "tomorrow 6am"')
-    a.add_argument("--label", default="")
-    a.add_argument("--repeat", default=None, help="once|daily|weekdays|weekends|weekly:MO,WE|RRULE")
-    a.add_argument("--sound", default=None)
-    a.add_argument("--tz", default=None)
-
-    li = sub.add_parser("list", help="List alarms")
-    li.add_argument("--all", action="store_true", help="Include disabled alarms")
-
-    r = sub.add_parser("remove", help="Delete an alarm")
-    r.add_argument("id")
-
-    e = sub.add_parser("enable", help="Enable an alarm")
-    e.add_argument("id")
-    d = sub.add_parser("disable", help="Disable an alarm")
-    d.add_argument("id")
-
-    n = sub.add_parser("next", help="Show next alarm to fire")
-    n.add_argument("--watch", action="store_true", help="Live countdown (refreshes)")
-
-    run = sub.add_parser("run", help="Foreground scheduler loop")
-    run.add_argument("--tick", type=float, default=1.0, help="Poll interval seconds (1-30)")
-
-    s = sub.add_parser("snooze", help="Snooze an alarm")
-    s.add_argument("id")
-    s.add_argument("minutes", nargs="?", type=int, default=None)
-    di = sub.add_parser("dismiss", help="Dismiss an alarm")
-    di.add_argument("id")
-
-    ed = sub.add_parser("edit", help="Modify an alarm")
-    ed.add_argument("id")
-    ed.add_argument("time", nargs="?", default=None, help='e.g. 07:30, "in 15m"')
-    ed.add_argument("--label", default=None)
-    ed.add_argument("--repeat", default=None)
-    ed.add_argument("--sound", default=None)
-    ed.add_argument("--tz", default=None)
-
-    daemon_p = sub.add_parser("daemon", help="Background scheduler")
-    dsub = daemon_p.add_subparsers(dest="daemon_cmd", required=True)
-    d_start = dsub.add_parser("start", help="Start the background daemon")
-    d_start.add_argument("--tick", type=float, default=1.0)
-    dsub.add_parser("stop", help="Stop the background daemon")
-    d_status = dsub.add_parser("status", help="Daemon status")
-    d_status.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    d_child = dsub.add_parser("_child", help=argparse.SUPPRESS)
-    d_child.add_argument("--tick", type=float, default=1.0)
-
-    cfg_p = sub.add_parser("config", help="Show or change configuration")
-    csub = cfg_p.add_subparsers(dest="config_cmd", required=True)
-    c_show = csub.add_parser("show", help="Show effective configuration")
-    c_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    c_set = csub.add_parser("set", help="Set a configuration value")
-    c_set.add_argument("key", help="e.g. snooze_minutes")
-    c_set.add_argument("value", help="e.g. 10")
-    c_set.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-
-    doc = sub.add_parser("doctor", help="Diagnose audio, notifications, storage")
-    doc.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-
-    comp = sub.add_parser("completions", help="Print shell completion script")
-    comp.add_argument("shell", help="bash, zsh or fish")
-    # Allow --json after the subcommand too (e.g. `alarm list --json`).
-    # (doctor/status/show define their own --json, so are excluded here.)
-    for sp in (a, li, r, e, d, n, run, s, di, ed, daemon_p):
-        sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
-                        help="Machine-readable output")
-    return p
+@app.callback()
+def _global(
+    ctx: typer.Context,
+    data_file: str | None = typer.Option(None, "--data-file", help="State file path."),
+    config_path: str | None = typer.Option(None, "--config", help="Config file path."),
+    json_output: bool = typer.Option(False, "--json", help="Machine-readable output."),
+    quiet: bool = typer.Option(False, "--quiet", help="Suppress normal output."),
+    verbose: bool = typer.Option(False, "--verbose", help="Verbose logging."),
+    debug: bool = typer.Option(
+        False, "--debug", help="Debug logging; re-raise errors."
+    ),
+) -> None:
+    global _DEBUG
+    _DEBUG = debug
+    setup_logging(verbose, debug)
+    ctx.obj = {
+        "data_file": data_file,
+        "config": config_path,
+        "json": json_output,
+        "quiet": quiet,
+    }
 
 
-def _wire(args: argparse.Namespace) -> tuple[AlarmService, AppConfig, str]:
-    config = load_config(args.config)
-    data_file = args.data_file or (config.data_dir or str(data_file_path()))
+def _wire(ctx: typer.Context) -> tuple[AlarmService, AppConfig, str]:
+    opts = ctx.obj
+    config = load_config(opts["config"])
+    data_file = opts["data_file"] or (config.data_dir or str(data_file_path()))
     repo = FileAlarmRepository(data_file)
     return AlarmService(repo, SystemClock(), config), config, data_file
+
+
+def _json_out(ctx: typer.Context, flag: bool) -> bool:
+    return bool(ctx.obj["json"] or flag)
+
+
+def _quiet(ctx: typer.Context) -> bool:
+    return bool(ctx.obj["quiet"])
+
+
+def _fail(exc: AlarmError, ctx: typer.Context) -> None:
+    if not _quiet(ctx):
+        print(f"error: {exc}", file=sys.stderr)
+    raise typer.Exit(code=exit_code_for(exc))
 
 
 def _daemon_manager(data_file: str) -> DaemonManager:
@@ -121,8 +102,10 @@ def _daemon_manager(data_file: str) -> DaemonManager:
     return DaemonManager(Path(data_file).expanduser().parent)
 
 
-def _forward_to_daemon(data_file: str, action: str, alarm_id: str, minutes: int | None = None) -> None:
-    """Best-effort: let a running daemon know about snooze/dismiss/stop."""
+def _forward_to_daemon(
+    data_file: str, action: str, alarm_id: str, minutes: int | None = None
+) -> None:
+    """Best-effort: let a running daemon know about snooze/dismiss."""
     try:
         mgr = _daemon_manager(data_file)
         if mgr.is_running():
@@ -131,217 +114,453 @@ def _forward_to_daemon(data_file: str, action: str, alarm_id: str, minutes: int 
         pass
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+def _next_map(service: AlarmService, now: datetime) -> dict[str, datetime]:
+    from alarmclock.domain.recurrence import next_fire as _nf
+
+    result: dict[str, datetime] = {}
+    for alarm in service.list(include_disabled=True):
+        fire_at = _nf(alarm, now)
+        if fire_at is not None:
+            result[alarm.id] = fire_at
+    return result
+
+
+@app.command()
+def add(
+    ctx: typer.Context,
+    time_expr: str = typer.Argument(..., help='e.g. 07:30, "in 15m", "tomorrow 6am".'),
+    label: str = typer.Option("", "--label", help="Alarm label."),
+    repeat: str | None = typer.Option(
+        None, "--repeat", help="once|daily|weekdays|weekends|weekly:MO,WE|RRULE."
+    ),
+    sound: str | None = typer.Option(None, "--sound", help="Sound file."),
+    tz: str | None = typer.Option(None, "--tz", help="IANA time zone."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Create an alarm."""
+    service, _, _ = _wire(ctx)
+    now = datetime.now().astimezone()
     try:
-        args = parser.parse_args(argv)
-    except SystemExit as exc:
-        return int(exc.code or 0)  # argparse usage errors -> exit 2, no traceback
-    if not hasattr(args, "json"):
-        args.json = False  # SUPPRESS defaults: flag given nowhere
-    setup_logging(args.verbose, args.debug)
-    try:
-        return _dispatch(args)
+        alarm = service.add(time_expr, label=label, repeat=repeat, sound=sound, tz=tz)
     except AlarmError as exc:
-        if not args.quiet:
-            print(f"error: {exc}", file=sys.stderr)
-        return exit_code_for(exc)
+        _fail(exc, ctx)
+        return
+    fire_at = next_fire(alarm, now)
+    if _json_out(ctx, json_flag):
+        print(
+            json.dumps(
+                {
+                    "alarm": alarm.to_dict(),
+                    "next_fire": fire_at.isoformat() if fire_at else None,
+                }
+            )
+        )
+    elif not _quiet(ctx):
+        print(
+            green(
+                f"Added {alarm.id} {alarm.time_str} {alarm.timezone} ({alarm.recurrence})"
+            )
+        )
+        if fire_at:
+            print(dim(f"  next fire: {fire_at:%Y-%m-%d %H:%M %Z}"))
+
+
+@app.command(name="list")
+def list_alarms(
+    ctx: typer.Context,
+    all: bool = typer.Option(False, "--all", help="Include disabled alarms."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """List alarms."""
+    service, _, _ = _wire(ctx)
+    alarms = service.list(include_disabled=all)
+    if _json_out(ctx, json_flag):
+        print(json.dumps([a.to_dict() for a in alarms], indent=2))
+        return
+    if _quiet(ctx):
+        return
+    if not alarms:
+        print(dim("No alarms."))
+        return
+    now = datetime.now().astimezone()
+    nxt = _next_map(service, now)
+    con = Console()
+    if con.is_terminal:
+        con.print(alarm_table(alarms, nxt))
+    else:
+        rows = [
+            [
+                a.id,
+                a.time_str,
+                a.timezone,
+                a.recurrence,
+                a.label or "-",
+                "on" if a.enabled else "off",
+                nxt[a.id].strftime("%Y-%m-%d %H:%M") if a.id in nxt else "-",
+            ]
+            for a in alarms
+        ]
+        print(
+            format_table(["ID", "TIME", "TZ", "REPEAT", "LABEL", "STATE", "NEXT"], rows)
+        )
+
+
+@app.command()
+def remove(
+    ctx: typer.Context,
+    alarm_id: str = typer.Argument(..., help="Alarm id (prefix ok)."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Delete an alarm."""
+    service, _, _ = _wire(ctx)
+    try:
+        service.remove(alarm_id)
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    if _json_out(ctx, json_flag):
+        print(json.dumps({"removed": alarm_id}))
+    elif not _quiet(ctx):
+        print(f"Removed {alarm_id}")
+
+
+@app.command()
+def enable(
+    ctx: typer.Context,
+    alarm_id: str = typer.Argument(...),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Enable an alarm."""
+    _set_enabled(ctx, alarm_id, True, json_flag)
+
+
+@app.command()
+def disable(
+    ctx: typer.Context,
+    alarm_id: str = typer.Argument(...),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Disable an alarm."""
+    _set_enabled(ctx, alarm_id, False, json_flag)
+
+
+def _set_enabled(
+    ctx: typer.Context, alarm_id: str, enabled: bool, json_flag: bool
+) -> None:
+    service, _, _ = _wire(ctx)
+    try:
+        alarm = service.set_enabled(alarm_id, enabled)
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    if _json_out(ctx, json_flag):
+        print(json.dumps(alarm.to_dict()))
+    elif not _quiet(ctx):
+        print(f"{'Enabled' if alarm.enabled else 'Disabled'} {alarm.id}")
+
+
+@app.command(name="next")
+def show_next(
+    ctx: typer.Context,
+    watch: bool = typer.Option(False, "--watch", help="Live countdown."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Show the next alarm to fire."""
+    service, _, _ = _wire(ctx)
+    now = datetime.now().astimezone()
+    nxt = service.next()
+    if nxt is None:
+        if _json_out(ctx, json_flag):
+            print(json.dumps(None))
+        elif not _quiet(ctx):
+            print(dim("No upcoming alarms."))
+        return
+    alarm, fire_at = nxt
+    if _json_out(ctx, json_flag):
+        print(json.dumps({"alarm": alarm.to_dict(), "next_fire": fire_at.isoformat()}))
+        return
+    if _quiet(ctx):
+        return
+    if watch:
+        _watch(service)
+    else:
+        delta = fire_at - now
+        print(
+            f"{alarm.id} {alarm.time_str} {alarm.label or ''} fires in {_fmt_delta(delta)} ({fire_at:%Y-%m-%d %H:%M %Z})"
+        )
+
+
+@app.command()
+def run(
+    ctx: typer.Context,
+    tick: float = typer.Option(1.0, "--tick", help="Poll interval seconds (1-30)."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Run the foreground scheduler loop."""
+    service, config, _ = _wire(ctx)
+    tick = min(30.0, max(1.0, tick))
+    runner = Runner(
+        service, SystemClock(), SystemPlayer(), DesktopNotifier(), config, tick=tick
+    )
+    con = Console()
+    if con.is_terminal and not _quiet(ctx):
+        nxt = service.next()
+        next_text = "none scheduled"
+        if nxt is not None:
+            alarm, fire_at = nxt
+            delta = fire_at - datetime.now().astimezone()
+            next_text = f"{alarm.label or alarm.id} in {_fmt_delta(delta)}"
+        con.print(run_banner(len(service.list(include_disabled=True)), next_text, tick))
+    elif not _quiet(ctx):
+        print(dim(f"Running foreground scheduler (tick {tick}s, Ctrl-C to stop)…"))
+    runner.run_forever()
+
+
+@app.command()
+def snooze(
+    ctx: typer.Context,
+    alarm_id: str = typer.Argument(...),
+    minutes: int | None = typer.Argument(None, help="Snooze length in minutes."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Snooze an alarm."""
+    service, _, data_file = _wire(ctx)
+    try:
+        alarm = service.snooze(alarm_id, minutes)
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    _forward_to_daemon(data_file, "snooze", alarm.id, minutes)
+    if _json_out(ctx, json_flag):
+        print(json.dumps(alarm.to_dict()))
+    elif not _quiet(ctx):
+        print(f"Snoozed {alarm.id} until {alarm.snooze_until:%Y-%m-%d %H:%M %Z}")
+
+
+@app.command()
+def dismiss(
+    ctx: typer.Context,
+    alarm_id: str = typer.Argument(...),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Dismiss an alarm."""
+    service, _, data_file = _wire(ctx)
+    try:
+        alarm = service.dismiss(alarm_id)
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    _forward_to_daemon(data_file, "dismiss", alarm.id)
+    if _json_out(ctx, json_flag):
+        print(json.dumps(alarm.to_dict()))
+    elif not _quiet(ctx):
+        print(f"Dismissed {alarm.id}")
+
+
+@app.command()
+def edit(
+    ctx: typer.Context,
+    alarm_id: str = typer.Argument(...),
+    time_expr: str | None = typer.Argument(None, help='e.g. 07:30, "in 15m".'),
+    label: str | None = typer.Option(None, "--label"),
+    repeat: str | None = typer.Option(None, "--repeat"),
+    sound: str | None = typer.Option(None, "--sound"),
+    tz: str | None = typer.Option(None, "--tz"),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Modify an alarm."""
+    service, _, _ = _wire(ctx)
+    try:
+        alarm = service.edit(
+            alarm_id,
+            time_expr=time_expr,
+            label=label,
+            repeat=repeat,
+            sound=sound,
+            tz=tz,
+        )
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    if _json_out(ctx, json_flag):
+        print(json.dumps(alarm.to_dict()))
+    elif not _quiet(ctx):
+        print(
+            f"Edited {alarm.id} {alarm.time_str} {alarm.timezone} ({alarm.recurrence})"
+        )
+
+
+@daemon_app.command()
+def start(
+    ctx: typer.Context,
+    tick: float = typer.Option(1.0, "--tick", help="Poll interval seconds (1-30)."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Start the background daemon."""
+    _, _, data_file = _wire(ctx)
+    mgr = _daemon_manager(data_file)
+    if ctx.obj.get("config"):
+        mgr.extra_argv = ["--config", ctx.obj["config"]]
+    tick = min(30.0, max(1.0, tick))
+    con = Console()
+    try:
+        with spinner("Starting daemon…", enabled=con.is_terminal and not _quiet(ctx)):
+            pid = mgr.start(tick=tick)
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    if _json_out(ctx, json_flag):
+        print(json.dumps({"started": True, "pid": pid}))
+    elif not _quiet(ctx):
+        print(f"Daemon started (pid {pid})")
+
+
+@daemon_app.command()
+def stop(
+    ctx: typer.Context,
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Stop the background daemon."""
+    _, _, data_file = _wire(ctx)
+    stopped = _daemon_manager(data_file).stop()
+    if _json_out(ctx, json_flag):
+        print(json.dumps({"stopped": stopped}))
+    elif not _quiet(ctx):
+        print("Daemon stopped" if stopped else "Daemon was not running")
+
+
+@daemon_app.command()
+def status(
+    ctx: typer.Context,
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Show daemon status."""
+    _, _, data_file = _wire(ctx)
+    info = _daemon_manager(data_file).status()
+    if _json_out(ctx, json_flag):
+        print(json.dumps(info))
+    elif not _quiet(ctx):
+        if info["running"]:
+            print(f"Daemon running (pid {info['pid']})")
+        else:
+            print("Daemon not running")
+
+
+@daemon_app.command(name="_child", hidden=True)
+def daemon_child(
+    ctx: typer.Context,
+    tick: float = typer.Option(1.0, "--tick"),
+) -> None:
+    """Daemon child entry (spawned by `daemon start`; not for manual use)."""
+    from pathlib import Path
+
+    _, _, data_file = _wire(ctx)
+    tick = min(30.0, max(1.0, tick))
+    daemon_main(Path(data_file).expanduser().parent, tick=tick)
+
+
+@config_app.command()
+def show(
+    ctx: typer.Context,
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Show effective configuration."""
+    from dataclasses import asdict
+
+    _, config, _ = _wire(ctx)
+    if _json_out(ctx, json_flag):
+        print(json.dumps(asdict(config), indent=2))
+    elif not _quiet(ctx):
+        rows = [[k, str(v)] for k, v in asdict(config).items()]
+        print(format_table(["KEY", "VALUE"], rows))
+
+
+@config_app.command()
+def set(
+    ctx: typer.Context,
+    key: str = typer.Argument(..., help="e.g. snooze_minutes."),
+    value: str = typer.Argument(..., help="e.g. 10."),
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Set a configuration value."""
+    from alarmclock.config import CONFIG_KEYS
+
+    _, config, _ = _wire(ctx)
+    try:
+        coerced = coerce_config_value(key, value)
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    setattr(config, key, coerced)
+    try:
+        path = save_config(config, ctx.obj["config"])
+    except AlarmError as exc:
+        _fail(exc, ctx)
+        return
+    if _json_out(ctx, json_flag):
+        print(json.dumps({"key": key, "value": coerced, "path": str(path)}))
+    elif not _quiet(ctx):
+        print(f"Set {key}={coerced} ({path})")
+        print(dim(f"Available keys: {', '.join(CONFIG_KEYS)}"))
+
+
+@app.command()
+def doctor(
+    ctx: typer.Context,
+    json_flag: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Diagnose audio, notifications, storage and config."""
+    _, _, data_file = _wire(ctx)
+    checks = run_checks(data_file, ctx.obj["config"])
+    status = overall_status(checks)
+    if _json_out(ctx, json_flag):
+        print(json.dumps({"status": status, "checks": checks}, indent=2))
+    elif not _quiet(ctx):
+        rows = [[c["check"], c["status"].upper(), c["detail"]] for c in checks]
+        print(format_table(["CHECK", "STATUS", "DETAIL"], rows))
+    if status == "fail":
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def completions(shell: str = typer.Argument(..., help="bash, zsh or fish.")) -> None:
+    """Print a shell completion script."""
+    try:
+        print(completion_script(shell), end="")
+    except AlarmError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=exit_code_for(exc)) from None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Invoke the Typer app with an explicit argv; return the exit code."""
+    try:
+        result = app(
+            args=list(argv) if argv is not None else None,
+            prog_name="alarm",
+            standalone_mode=False,
+        )
+        # typer.Exit(code) and --help surface as the return value.
+        return result if isinstance(result, int) else 0
+    except NoArgsIsHelpError:
+        return 0  # help already shown; not an error
+    except UsageError as exc:
+        print(f"error: {exc.format_message()}", file=sys.stderr)
+        return exc.exit_code
+    except typer.Abort:
+        return 1
     except BrokenPipeError:
-        return 0  # piped to head/tail: silent success per CLI convention
+        return 0
     except KeyboardInterrupt:
         return 0
-    except Exception as exc:  # noqa: BLE001 - last resort: never a traceback
-        if args.debug:
+    except Exception as exc:
+        if _DEBUG:
             raise
         print(f"internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 
-def _dispatch(args: argparse.Namespace) -> int:
-    service, config, data_file = _wire(args)
-    now = datetime.now().astimezone()
-
-    if args.command == "add":
-        alarm = service.add(args.time, label=args.label, repeat=args.repeat, sound=args.sound, tz=args.tz)
-        fire_at = next_fire(alarm, now)
-        if args.json:
-            print(json.dumps({"alarm": alarm.to_dict(), "next_fire": fire_at.isoformat() if fire_at else None}))
-        elif not args.quiet:
-            print(green(f"Added {alarm.id} {alarm.time_str} {alarm.timezone} ({alarm.recurrence})"))
-            if fire_at:
-                print(dim(f"  next fire: {fire_at:%Y-%m-%d %H:%M %Z}"))
-        return 0
-
-    if args.command == "list":
-        alarms = service.list(include_disabled=args.all)
-        if args.json:
-            print(json.dumps([a.to_dict() for a in alarms], indent=2))
-        elif not args.quiet:
-            if not alarms:
-                print(dim("No alarms."))
-            else:
-                rows = [
-                    [a.id, a.time_str, a.timezone, a.recurrence, a.label or "-", "on" if a.enabled else "off"]
-                    for a in alarms
-                ]
-                print(format_table(["ID", "TIME", "TZ", "REPEAT", "LABEL", "STATE"], rows))
-        return 0
-
-    if args.command == "remove":
-        service.remove(args.id)
-        if args.json:
-            print(json.dumps({"removed": args.id}))
-        elif not args.quiet:
-            print(f"Removed {args.id}")
-        return 0
-
-    if args.command in {"enable", "disable"}:
-        alarm = service.set_enabled(args.id, args.command == "enable")
-        if args.json:
-            print(json.dumps(alarm.to_dict()))
-        elif not args.quiet:
-            print(f"{'Enabled' if alarm.enabled else 'Disabled'} {alarm.id}")
-        return 0
-
-    if args.command == "next":
-        nxt = service.next()
-        if nxt is None:
-            if args.json:
-                print(json.dumps(None))
-            elif not args.quiet:
-                print(dim("No upcoming alarms."))
-            return 0
-        alarm, fire_at = nxt
-        if args.json:
-            print(json.dumps({"alarm": alarm.to_dict(), "next_fire": fire_at.isoformat()}))
-        elif not args.quiet:
-            if args.watch:
-                _watch(alarm.id, service)
-            else:
-                delta = fire_at - now
-                print(f"{alarm.id} {alarm.time_str} {alarm.label or ''} fires in {_fmt_delta(delta)} ({fire_at:%Y-%m-%d %H:%M %Z})")
-        return 0
-
-    if args.command == "run":
-        tick = min(30.0, max(1.0, args.tick))
-        runner = Runner(service, SystemClock(), SystemPlayer(), DesktopNotifier(), config, tick=tick)
-        if not args.quiet:
-            print(dim(f"Running foreground scheduler (tick {tick}s, Ctrl-C to stop)…"))
-        runner.run_forever()
-        return 0
-
-    if args.command == "snooze":
-        alarm = service.snooze(args.id, args.minutes)
-        _forward_to_daemon(data_file, "snooze", alarm.id, args.minutes)
-        if args.json:
-            print(json.dumps(alarm.to_dict()))
-        elif not args.quiet:
-            print(f"Snoozed {alarm.id} until {alarm.snooze_until:%Y-%m-%d %H:%M %Z}")
-        return 0
-
-    if args.command == "dismiss":
-        alarm = service.dismiss(args.id)
-        _forward_to_daemon(data_file, "dismiss", alarm.id)
-        if args.json:
-            print(json.dumps(alarm.to_dict()))
-        elif not args.quiet:
-            print(f"Dismissed {alarm.id}")
-        return 0
-
-    if args.command == "edit":
-        alarm = service.edit(
-            args.id, time_expr=args.time, label=args.label,
-            repeat=args.repeat, sound=args.sound, tz=args.tz,
-        )
-        if args.json:
-            print(json.dumps(alarm.to_dict()))
-        elif not args.quiet:
-            print(f"Edited {alarm.id} {alarm.time_str} {alarm.timezone} ({alarm.recurrence})")
-        return 0
-
-    if args.command == "daemon":
-        from pathlib import Path
-
-        mgr = _daemon_manager(data_file)
-        if args.daemon_cmd == "_child":
-            tick = min(30.0, max(1.0, args.tick))
-            daemon_main(Path(data_file).expanduser().parent, tick=tick)
-            return 0
-        if args.daemon_cmd == "start":
-            tick = min(30.0, max(1.0, args.tick))
-            if args.config:
-                mgr.extra_argv = ["--config", args.config]
-            pid = mgr.start(tick=tick)
-            if args.json:
-                print(json.dumps({"started": True, "pid": pid}))
-            elif not args.quiet:
-                print(f"Daemon started (pid {pid})")
-            return 0
-        if args.daemon_cmd == "stop":
-            stopped = mgr.stop()
-            if args.json:
-                print(json.dumps({"stopped": stopped}))
-            elif not args.quiet:
-                print("Daemon stopped" if stopped else "Daemon was not running")
-            return 0
-        if args.daemon_cmd == "status":
-            info = mgr.status()
-            if args.json or getattr(args, "json", False):
-                print(json.dumps(info))
-            elif not args.quiet:
-                if info["running"]:
-                    print(f"Daemon running (pid {info['pid']})")
-                else:
-                    print("Daemon not running")
-            return 0
-
-    if args.command == "config":
-        from dataclasses import asdict
-
-        from alarmclock.config import CONFIG_KEYS, coerce_config_value, save_config
-
-        if args.config_cmd == "show":
-            data = asdict(config)
-            if args.json:
-                print(json.dumps(data, indent=2))
-            elif not args.quiet:
-                rows = [[k, str(v)] for k, v in data.items()]
-                print(format_table(["KEY", "VALUE"], rows))
-            return 0
-        # config set
-        value = coerce_config_value(args.key, args.value)
-        setattr(config, args.key, value)
-        path = save_config(config, args.config)
-        if args.json:
-            print(json.dumps({"key": args.key, "value": value, "path": str(path)}))
-        elif not args.quiet:
-            print(f"Set {args.key}={value} ({path})")
-            print(dim(f"Available keys: {', '.join(CONFIG_KEYS)}"))
-        return 0
-
-    if args.command == "doctor":
-        from alarmclock.cli.doctor import overall_status, run_checks
-
-        checks = run_checks(data_file, args.config)
-        if args.json:
-            print(json.dumps({"status": overall_status(checks), "checks": checks}, indent=2))
-        elif not args.quiet:
-            rows = [[c["check"], c["status"].upper(), c["detail"]] for c in checks]
-            print(format_table(["CHECK", "STATUS", "DETAIL"], rows))
-        return 0 if overall_status(checks) != "fail" else 1
-
-    if args.command == "completions":
-        from alarmclock.cli.completions import completion_script
-
-        print(completion_script(args.shell), end="")
-        return 0
-
-    parser = build_parser()
-    parser.error(f"unknown command {args.command}")
-    return 2
-
-
-def _fmt_delta(delta) -> str:
+def _fmt_delta(delta: timedelta) -> str:
     s = max(0, int(delta.total_seconds()))
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
@@ -352,21 +571,34 @@ def _fmt_delta(delta) -> str:
     return f"{sec}s"
 
 
-def _watch(alarm_id: str, service: AlarmService) -> None:
-    import time
-
-    try:
-        while True:
-            nxt = service.next()
-            if nxt is None:
-                print("\rNo upcoming alarms.   ", end="", flush=True)
-                return
+def _watch(service: AlarmService) -> None:
+    con = Console()
+    if not con.is_terminal:
+        nxt = service.next()
+        if nxt is None:
+            print(dim("No upcoming alarms."))
+        else:
             alarm, fire_at = nxt
             delta = fire_at - datetime.now().astimezone()
-            print(f"\r{alarm.id} fires in {_fmt_delta(delta)}   ", end="", flush=True)
-            time.sleep(1)
+            print(f"{alarm.id} fires in {_fmt_delta(delta)}")
+        return
+    try:
+        with Live("", refresh_per_second=2, console=con) as live:
+            while True:
+                nxt = service.next()
+                if nxt is None:
+                    live.update("No upcoming alarms.   ")
+                    return
+                alarm, fire_at = nxt
+                delta = fire_at - datetime.now().astimezone()
+                live.update(
+                    f"⏰ {alarm.id} {alarm.time_str} {alarm.label or ''} "
+                    f"fires in [bold]{_fmt_delta(delta)}[/bold]"
+                )
+                time.sleep(0.5)
     except KeyboardInterrupt:
-        print()
+        pass
+    con.print()
 
 
 if __name__ == "__main__":

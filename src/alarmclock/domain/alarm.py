@@ -72,6 +72,7 @@ class Alarm:
     @property
     def time_str(self) -> str:
         return f"{self.hour:02d}:{self.minute:02d}"
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -81,10 +82,14 @@ class Alarm:
             "recurrence": self.recurrence,
             "sound": self.sound,
             "enabled": self.enabled,
-            "snooze_until": self.snooze_until.isoformat() if self.snooze_until else None,
+            "snooze_until": self.snooze_until.isoformat()
+            if self.snooze_until
+            else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "date": self.date,
-            "last_fired_at": self.last_fired_at.isoformat() if self.last_fired_at else None,
+            "last_fired_at": self.last_fired_at.isoformat()
+            if self.last_fired_at
+            else None,
             "snooze_count": self.snooze_count,
         }
 

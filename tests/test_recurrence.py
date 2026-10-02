@@ -13,7 +13,14 @@ UTC = ZoneInfo("UTC")
 
 
 def _alarm(**kw):
-    base = dict(id="a1", label="t", hour=9, minute=30, timezone="UTC", recurrence="ONCE")
+    base = {
+        "id": "a1",
+        "label": "t",
+        "hour": 9,
+        "minute": 30,
+        "timezone": "UTC",
+        "recurrence": "ONCE",
+    }
     base.update(kw)
     return Alarm(**base)
 
@@ -38,7 +45,9 @@ def test_once_today_or_tomorrow():
 
 def test_daily_skips_past_today():
     now = datetime(2026, 10, 1, 10, 0, tzinfo=UTC)
-    assert next_fire(_alarm(recurrence="DAILY"), now) == datetime(2026, 10, 2, 9, 30, tzinfo=UTC)
+    assert next_fire(_alarm(recurrence="DAILY"), now) == datetime(
+        2026, 10, 2, 9, 30, tzinfo=UTC
+    )
 
 
 def test_weekdays_skip_weekend():

@@ -38,6 +38,9 @@ class FileAlarmRepository:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
         self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        # (mtime_ns, size, alarms): skips JSON re-parses when nothing changed.
+        # Every mutation path goes through _write_all_locked, which clears it.
+        self._cache: tuple[tuple[int, int], list[Alarm]] | None = None
 
     # -- public API -----------------------------------------------------
     def list(self) -> list[Alarm]:
@@ -64,7 +67,9 @@ class FileAlarmRepository:
     def delete(self, alarm_id: str) -> bool:
         with self._locked():
             alarms = self._read_all_locked()
-            kept = [a for a in alarms if not (a.id == alarm_id or a.id.startswith(alarm_id))]
+            kept = [
+                a for a in alarms if not (a.id == alarm_id or a.id.startswith(alarm_id))
+            ]
             if len(kept) == len(alarms):
                 return False
             self._write_all_locked(kept)
@@ -83,13 +88,20 @@ class FileAlarmRepository:
 
     def _read_all_locked(self) -> list[Alarm]:
         if not self.path.exists():
+            self._cache = None
             return []
+        key = self._stat_key()
+        if key is not None and self._cache is not None and self._cache[0] == key:
+            return list(self._cache[1])
         try:
             raw = self.path.read_text(encoding="utf-8")
             if not raw.strip():
+                if key is not None:
+                    self._cache = (key, [])
                 return []  # freshly created / empty file
             payload = json.loads(raw)
         except (OSError, ValueError) as exc:
+            self._cache = None
             self._backup_corrupt()
             raise StorageError(
                 f"State file corrupt, backed up next to {self.path.name}. "
@@ -99,6 +111,7 @@ class FileAlarmRepository:
             payload = self._apply_migrations(payload, from_version=0)
         version = payload.get("version", 1) if isinstance(payload, dict) else 1
         if not isinstance(payload, dict) or "alarms" not in payload:
+            self._cache = None
             self._backup_corrupt()
             raise StorageError(f"State file has unexpected shape: {self.path}")
         if version != SCHEMA_VERSION:
@@ -108,13 +121,30 @@ class FileAlarmRepository:
             for entry in payload.get("alarms", []):
                 alarms.append(Alarm.from_dict(entry))
         except Exception as exc:
+            self._cache = None
             self._backup_corrupt()
             raise StorageError(f"State file has invalid alarm entries: {exc}") from exc
+        if key is not None:
+            self._cache = (key, alarms)
         return alarms
 
+    def _stat_key(self) -> tuple[int, int] | None:
+        """(mtime_ns, size) fingerprint, or None when stat fails."""
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
     def _apply_migrations(self, payload: dict | list, from_version: int) -> dict:
-        current = payload if isinstance(payload, dict) else {"version": 0, "alarms": payload}
-        v = from_version if isinstance(payload, list) else int(current.get("version", 0))
+        current = (
+            payload if isinstance(payload, dict) else {"version": 0, "alarms": payload}
+        )
+        v = (
+            from_version
+            if isinstance(payload, list)
+            else int(current.get("version", 0))
+        )
         while v < SCHEMA_VERSION:
             fn = MIGRATIONS.get((v, v + 1))
             if fn is None:
@@ -126,8 +156,11 @@ class FileAlarmRepository:
 
     def _write_all_locked(self, alarms: list[Alarm]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache = None  # mutated below; never serve stale entries
         payload = {"version": SCHEMA_VERSION, "alarms": [a.to_dict() for a in alarms]}
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".alarms-", suffix=".tmp")
+        fd, tmp = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=".alarms-", suffix=".tmp"
+        )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2)
@@ -157,7 +190,7 @@ class FileAlarmRepository:
             pass
 
     @contextlib.contextmanager
-    def _locked(self):  # noqa: C901 - platform branches
+    def _locked(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # POSIX: real flock on the state file itself.
         try:
@@ -176,20 +209,17 @@ class FileAlarmRepository:
         except OSError:
             pass
         # Windows: msvcrt locking on a sidecar.
-        try:
+        try:  # pragma: no cover - Windows-only branch
             import msvcrt  # type: ignore[import-not-found]
 
-            fh = open(self._lock_path, "w", encoding="utf-8")
-            try:
-                fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
-                yield
-            finally:
+            with contextlib.closing(open(self._lock_path, "w", encoding="utf-8")) as fh:
                 try:
                     fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                    yield
                 finally:
-                    fh.close()
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
             return
         except ImportError:
             pass

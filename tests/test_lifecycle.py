@@ -27,11 +27,17 @@ def _service(tmp_path, start: datetime, name="alarms.json", **cfg_kwargs):
 
 def _runner(svc, clock, cfg):
     player, notifier = FakePlayer(), FakeNotifier()
-    return Runner(svc, clock, player, notifier, cfg, sleep_fn=lambda s: None), player, notifier
+    return (
+        Runner(svc, clock, player, notifier, cfg, sleep_fn=lambda s: None),
+        player,
+        notifier,
+    )
 
 
 def test_snooze_cap_enforced(tmp_path):
-    svc, _, _ = _service(tmp_path, datetime(2026, 10, 1, 8, 0, tzinfo=UTC), max_snoozes=2)
+    svc, _, _ = _service(
+        tmp_path, datetime(2026, 10, 1, 8, 0, tzinfo=UTC), max_snoozes=2
+    )
     a = svc.add("09:30")
     svc.snooze(a.id)
     svc.snooze(a.id)
@@ -40,7 +46,9 @@ def test_snooze_cap_enforced(tmp_path):
 
 
 def test_dismiss_resets_snooze_count(tmp_path):
-    svc, _, _ = _service(tmp_path, datetime(2026, 10, 1, 8, 0, tzinfo=UTC), max_snoozes=1)
+    svc, _, _ = _service(
+        tmp_path, datetime(2026, 10, 1, 8, 0, tzinfo=UTC), max_snoozes=1
+    )
     a = svc.add("09:30")
     svc.snooze(a.id)
     with pytest.raises(InvalidInput):
@@ -61,7 +69,7 @@ def test_ring_plays_until_timeout(tmp_path):
 
 def test_external_dismiss_stops_ring(tmp_path):
     svc, clock, cfg = _service(tmp_path, datetime(2026, 10, 1, 9, 29, tzinfo=UTC))
-    a = svc.add("09:30", repeat="daily")
+    svc.add("09:30", repeat="daily")
     player = FakePlayer()
     runner = Runner(svc, clock, player, FakeNotifier(), cfg, sleep_fn=lambda s: None)
     orig_get = svc.repo.get

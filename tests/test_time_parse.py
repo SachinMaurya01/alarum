@@ -22,12 +22,12 @@ def test_absolute_pm():
 
 
 def test_relative_minutes():
-    h, m, d, tz = parse_time_input("in 15m", NOW, "UTC")
+    h, m, d, _tz = parse_time_input("in 15m", NOW, "UTC")
     assert (h, m, d) == (12, 15, "2026-10-01")
 
 
 def test_relative_combo():
-    h, m, d, _ = parse_time_input("in 2h30m", NOW, "UTC")
+    h, m, _d, _ = parse_time_input("in 2h30m", NOW, "UTC")
     assert (h, m) == (14, 30)
 
 
@@ -36,7 +36,12 @@ def test_natural_tomorrow():
 
 
 def test_dated():
-    assert parse_time_input("2026-12-01 06:00", NOW, "UTC") == (6, 0, "2026-12-01", "UTC")
+    assert parse_time_input("2026-12-01 06:00", NOW, "UTC") == (
+        6,
+        0,
+        "2026-12-01",
+        "UTC",
+    )
 
 
 def test_invalid():
