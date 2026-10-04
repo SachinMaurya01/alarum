@@ -18,6 +18,8 @@ in a single local JSON file and fire via a foreground loop or a background daemo
 - Operable: background daemon, `doctor` diagnostics, validated config,
   shell completions
 
+<img width="1202" height="835" alt="Screenshot From 2026-10-04 10-48-59" src="https://github.com/user-attachments/assets/261f1ebb-937e-4c73-9e00-4fa0917158fa" />
+
 ## Contents
 
 - [Requirements](#requirements)
